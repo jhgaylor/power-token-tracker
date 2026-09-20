@@ -1,69 +1,109 @@
 // Power & Token Tracker GNOME Shell Extension
 // Tracks GPU power consumption and AI token costs
 
-const { Gio, GLib, St } = imports.gi;
-const Main = imports.ui.main;
-const PanelMenu = imports.ui.panelMenu;
-const PopupMenu = imports.ui.popupMenu;
-const ExtensionUtils = imports.misc.extensionUtils;
+import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
+import Gio from 'gi://Gio';
+import Soup from 'gi://Soup?version=3.0';
+import St from 'gi://St';
 
-const Me = ExtensionUtils.getCurrentExtension();
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-class PowerTokenTracker {
-    constructor() {
-        this._settings = ExtensionUtils.getSettings();
-        this._indicator = null;
-        this._updateTimeoutId = null;
-        this._totalTokens = 0;
-        this._powerHistory = [];
-        this._maxHistoryPoints = 360;
+const HWMON_DIR = '/sys/class/hwmon';
+const DECODER = new TextDecoder();
+
+// hwmon indices are not stable across boots, so locate the GPU by driver name.
+function findGpuPowerFile() {
+    const names = ['amdgpu', 'nvidia', 'i915', 'xe'];
+    const dir = Gio.File.new_for_path(HWMON_DIR);
+
+    let entries;
+    try {
+        entries = dir.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+    } catch (e) {
+        console.error(`power-token-tracker: cannot enumerate ${HWMON_DIR}: ${e.message}`);
+        return null;
     }
 
-    enable() {
-        this._indicator = new PanelMenu.Button(0.0, 'Power & Token Tracker', false);
-        this._label = new St.Label({ text: '⚡ --W' });
-        this._indicator.add_child(this._label);
-        Main.panel.addToStatusArea('PowerTokenTracker', this._indicator, 1, 'right');
+    let info;
+    while ((info = entries.next_file(null)) !== null) {
+        const path = GLib.build_filenamev([HWMON_DIR, info.get_name()]);
+        let name;
+        try {
+            const [ok, contents] = GLib.file_get_contents(GLib.build_filenamev([path, 'name']));
+            if (!ok)
+                continue;
+            name = DECODER.decode(contents).trim();
+        } catch (e) {
+            continue;
+        }
 
-        this._menu = new PopupMenu.PopupMenu(this._indicator, 0.5, St.Side.BOTTOM);
-        this._indicator.add_child(this._menu.actor);
+        if (!names.includes(name))
+            continue;
 
-        this._powerItem = new PopupMenu.PopupMenuItem('Power: -- W');
+        for (const attr of ['power1_average', 'power1_input']) {
+            const file = GLib.build_filenamev([path, attr]);
+            if (GLib.file_test(file, GLib.FileTest.EXISTS))
+                return file;
+        }
+    }
+
+    return null;
+}
+
+const PowerTokenIndicator = GObject.registerClass(
+class PowerTokenIndicator extends PanelMenu.Button {
+    _init(extension) {
+        super._init(0.0, 'Power & Token Tracker', false);
+
+        this._extension = extension;
+        this._settings = extension.getSettings();
+        this._session = new Soup.Session({timeout: 5});
+        this._cancellable = new Gio.Cancellable();
+        this._updateTimeoutId = 0;
+        this._powerFile = findGpuPowerFile();
+        this._powerHistory = [];
+        this._maxHistoryPoints = 360;
+
+        this._label = new St.Label({
+            text: '⚡ --W',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this.add_child(this._label);
+
+        this._powerItem = new PopupMenu.PopupMenuItem('Current Power: -- W');
         this._tokenItem = new PopupMenu.PopupMenuItem('Tokens (1h): --');
         this._costPerTokenItem = new PopupMenu.PopupMenuItem('Cost/M Tokens: --');
         this._avgPowerItem = new PopupMenu.PopupMenuItem('Avg Power: -- W');
         this._energyCostItem = new PopupMenu.PopupMenuItem('Energy Cost/Hr: --');
-        this._settingsItem = new PopupMenu.PopupMenuItem('⚙️ Configure');
 
-        this._menu.addMenuItem(this._powerItem);
-        this._menu.addMenuItem(this._tokenItem);
-        this._menu.addMenuItem(this._costPerTokenItem);
-        this._menu.addMenuItem(this._avgPowerItem);
-        this._menu.addMenuItem(this._energyCostItem);
-        this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        this._menu.addMenuItem(this._settingsItem);
+        for (const item of [this._powerItem, this._tokenItem, this._costPerTokenItem,
+                            this._avgPowerItem, this._energyCostItem]) {
+            item.sensitive = false;
+            this.menu.addMenuItem(item);
+        }
 
-        this._settingsItem.connect('activate', () => {
-            this._openSettings();
-        });
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        this._startUpdates();
+        const settingsItem = new PopupMenu.PopupMenuItem('⚙️ Configure');
+        settingsItem.connect('activate', () => extension.openPreferences());
+        this.menu.addMenuItem(settingsItem);
+
+        this._settings.connect('changed::update-interval', () => this._restartUpdates());
+        this._restartUpdates();
         this._update();
     }
 
-    disable() {
+    _restartUpdates() {
         if (this._updateTimeoutId) {
             GLib.source_remove(this._updateTimeoutId);
-            this._updateTimeoutId = null;
+            this._updateTimeoutId = 0;
         }
-        if (this._indicator) {
-            this._indicator.destroy();
-            this._indicator = null;
-        }
-        this._settings = null;
-    }
 
-    _startUpdates() {
         const interval = this._settings.get_int('update-interval');
         this._updateTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, interval, () => {
             this._update();
@@ -72,33 +112,43 @@ class PowerTokenTracker {
     }
 
     _readPower() {
+        if (!this._powerFile)
+            return 0;
+
         try {
-            const powerFile = '/sys/class/hwmon/hwmon6/power1_average';
-            const [success, contents] = GLib.file_get_contents(powerFile);
-            if (success) {
-                const watts = parseFloat(GLib.UTF8_TO_STRING_TRIMMED(contents)) / 1_000_000;
-                return watts;
-            }
+            const [ok, contents] = GLib.file_get_contents(this._powerFile);
+            if (!ok)
+                return 0;
+            // hwmon reports microwatts.
+            return parseFloat(DECODER.decode(contents).trim()) / 1_000_000;
         } catch (e) {
-            log(`Error reading power: ${e.message}`);
+            console.error(`power-token-tracker: error reading power: ${e.message}`);
+            return 0;
         }
-        return 0;
     }
 
     _fetchTokenMetrics(callback) {
-        const baseUrl = this._settings.get_string('hal0-url');
-        const uri = `${baseUrl}/api/stats`;
-        const file = Gio.File.new_for_uri(uri);
-        const cancellable = new Gio.Cancellable();
+        const baseUrl = this._settings.get_string('hal0-url').replace(/\/+$/, '');
+        let message;
+        try {
+            message = Soup.Message.new('GET', `${baseUrl}/api/stats`);
+        } catch (e) {
+            callback(null);
+            return;
+        }
 
-        file.load_contents_async(cancellable, (source, res) => {
+        this._session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, this._cancellable, (session, res) => {
             try {
-                const [success, contents] = source.load_contents_finish(res);
-                const json = JSON.parse(GLib.UTF8_TO_STRING_TRIMMED(contents));
-                callback(json.totals?.tokens_completed || 0);
+                const bytes = session.send_and_read_finish(res);
+                if (message.get_status() !== Soup.Status.OK)
+                    throw new Error(`HTTP ${message.get_status()}`);
+
+                const json = JSON.parse(DECODER.decode(bytes.get_data()));
+                callback(json.totals?.tokens_completed ?? null);
             } catch (e) {
-                log(`Error fetching token metrics: ${e.message}`);
-                callback(0);
+                if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                    console.error(`power-token-tracker: error fetching token metrics: ${e.message}`);
+                callback(null);
             }
         });
     }
@@ -106,60 +156,64 @@ class PowerTokenTracker {
     _update() {
         const power = this._readPower();
         this._powerHistory.push(power);
-        if (this._powerHistory.length > this._maxHistoryPoints) {
+        if (this._powerHistory.length > this._maxHistoryPoints)
             this._powerHistory.shift();
-        }
 
-        this._fetchTokenMetrics((totalTokens) => {
-            const newTokens = totalTokens - this._totalTokens;
-            this._totalTokens = totalTokens;
+        const avgPower = this._powerHistory.reduce((sum, p) => sum + p, 0) / this._powerHistory.length;
+        const costPerKwh = this._settings.get_double('cost-per-kwh');
+        const costPerHour = (avgPower / 1000) * costPerKwh;
 
-            const avgPower = this._powerHistory.reduce((sum, p) => sum + p, 0) / this._powerHistory.length;
-            const costPerKwh = this._settings.get_double('cost-per-kwh');
-            const energyPerHour = avgPower / 1000;
-            const costPerHour = energyPerHour * costPerKwh;
-            const costPerMillionTokens = newTokens > 0 ? (costPerHour / newTokens) * 1_000_000 : 0;
+        this._label.text = `⚡ ${power.toFixed(0)}W`;
+        this._powerItem.label.text = `Current Power: ${power.toFixed(1)} W`;
+        this._avgPowerItem.label.text = `Avg Power: ${avgPower.toFixed(1)} W`;
+        this._energyCostItem.label.text = `Energy Cost/Hr: $${costPerHour.toFixed(4)}`;
 
-            GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
-                try {
-                    this._label.text = `⚡ ${power.toFixed(0)}W`;
-                    this._powerItem.label = `Current Power: ${power.toFixed(1)} W`;
-                    this._tokenItem.label = `Tokens (1h): ${totalTokens.toLocaleString()} (+${newTokens.toLocaleString()})`;
-                    this._avgPowerItem.label = `Avg Power: ${avgPower.toFixed(1)} W`;
-                    this._energyCostItem.label = `Energy Cost/Hr: $${costPerHour.toFixed(4)}`;
+        this._fetchTokenMetrics(tokensPerHour => {
+            if (tokensPerHour === null) {
+                this._tokenItem.label.text = 'Tokens (1h): unavailable';
+                this._costPerTokenItem.label.text = 'Cost/M Tokens: --';
+                return;
+            }
 
-                    if (this._settings.get_boolean('show-cost-per-token')) {
-                        this._costPerTokenItem.label = `Cost/M Tokens: $${costPerMillionTokens.toFixed(4)}`;
-                    } else {
-                        this._costPerTokenItem.label = 'Cost/M Tokens: --';
-                    }
-                } catch (e) {
-                    log(`Error updating UI: ${e.message}`);
-                }
-                return GLib.SOURCE_REMOVE;
-            });
+            this._tokenItem.label.text = `Tokens (1h): ${tokensPerHour.toLocaleString()}`;
+
+            if (!this._settings.get_boolean('show-cost-per-token')) {
+                this._costPerTokenItem.label.text = 'Cost/M Tokens: --';
+                return;
+            }
+
+            // hal0 reports a rolling 1h window, so tokens/hour pairs directly with $/hour.
+            const costPerMillionTokens = tokensPerHour > 0
+                ? (costPerHour / tokensPerHour) * 1_000_000
+                : 0;
+            this._costPerTokenItem.label.text = tokensPerHour > 0
+                ? `Cost/M Tokens: $${costPerMillionTokens.toFixed(4)}`
+                : 'Cost/M Tokens: idle';
         });
-
-        return GLib.SOURCE_CONTINUE;
     }
 
-    _openSettings() {
-        GLib.spawn_command_line_sync('gnome-extensions prefs power-token-tracker@jhgaylor.local');
+    destroy() {
+        if (this._updateTimeoutId) {
+            GLib.source_remove(this._updateTimeoutId);
+            this._updateTimeoutId = 0;
+        }
+        this._cancellable.cancel();
+        this._session.abort();
+        this._session = null;
+        this._settings = null;
+        this._extension = null;
+        super.destroy();
     }
-}
+});
 
-let powerTokenTracker;
+export default class PowerTokenTrackerExtension extends Extension {
+    enable() {
+        this._indicator = new PowerTokenIndicator(this);
+        Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'right');
+    }
 
-function init() {
-    return new PowerTokenTracker();
-}
-
-function enable() {
-    powerTokenTracker = new PowerTokenTracker();
-    powerTokenTracker.enable();
-}
-
-function disable() {
-    powerTokenTracker.disable();
-    powerTokenTracker = null;
+    disable() {
+        this._indicator?.destroy();
+        this._indicator = null;
+    }
 }
