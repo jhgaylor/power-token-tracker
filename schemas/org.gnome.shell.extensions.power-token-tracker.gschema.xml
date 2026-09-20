@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="gnome-shell-extensions">
+  <schema id="org.gnome.shell.extensions.power-token-tracker" path="/org/gnome/shell/extensions/power-token-tracker/">
+    <key type="d" name="cost-per-kwh">
+      <default>0.12</default>
+      <summary>Cost per kWh in dollars</summary>
+      <description>The cost of electricity in dollars per kilowatt-hour.</description>
+    </key>
+    <key type="i" name="update-interval">
+      <default>10</default>
+      <summary>Update interval in seconds</summary>
+      <description>How often to refresh power and token data.</description>
+    </key>
+    <key type="b" name="show-cost-per-token">
+      <default>true</default>
+      <summary>Show cost per token</summary>
+      <description>Whether to display the calculated cost per token.</description>
+    </key>
+    <key type="s" name="hal0-url">
+      <default>'http://localhost:8080'</default>
+      <summary>hal0 API URL</summary>
+      <description>The URL of the hal0 API endpoint.</description>
+    </key>
+  </schema>
+</schemalist>
