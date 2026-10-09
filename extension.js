@@ -89,20 +89,60 @@ class PowerTokenIndicator extends PanelMenu.Button {
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
+        this._trackingItem = new PopupMenu.PopupSwitchMenuItem('Tracking', false);
+        this._trackingItem.connect('toggled', (_item, state) => this._setTracking(state));
+        this.menu.addMenuItem(this._trackingItem);
+
         const settingsItem = new PopupMenu.PopupMenuItem('⚙️ Configure');
         settingsItem.connect('activate', () => extension.openPreferences());
         this.menu.addMenuItem(settingsItem);
 
-        this._settings.connect('changed::update-interval', () => this._restartUpdates());
-        this._restartUpdates();
-        this._update();
+        this._tracking = null;  // neither state yet, so the first _setTracking always applies
+        this._settings.connect('changed::update-interval', () => {
+            if (this._tracking)
+                this._restartUpdates();
+        });
+        this._setTracking(this._settings.get_boolean('start-on-login'));
     }
 
-    _restartUpdates() {
+    // Pausing stops all polling (hwmon and hal0) until resumed. It is not persisted:
+    // the next login starts according to the start-on-login setting.
+    _setTracking(tracking) {
+        if (this._trackingItem.state !== tracking)
+            this._trackingItem.setToggleState(tracking);
+        if (this._tracking === tracking)
+            return;
+        this._tracking = tracking;
+
+        if (tracking) {
+            this._restartUpdates();
+            this._update();
+            return;
+        }
+
+        this._stopUpdates();
+        this._cancellable.cancel();
+        this._cancellable = new Gio.Cancellable();
+        // Drop the history so a resumed average is not skewed by stale samples.
+        this._powerHistory = [];
+
+        this._label.text = '⚡ off';
+        this._powerItem.label.text = 'Current Power: paused';
+        this._tokenItem.label.text = 'Tokens (1h): paused';
+        this._costPerTokenItem.label.text = 'Cost/M Tokens: --';
+        this._avgPowerItem.label.text = 'Avg Power: -- W';
+        this._energyCostItem.label.text = 'Energy Cost/Hr: --';
+    }
+
+    _stopUpdates() {
         if (this._updateTimeoutId) {
             GLib.source_remove(this._updateTimeoutId);
             this._updateTimeoutId = 0;
         }
+    }
+
+    _restartUpdates() {
+        this._stopUpdates();
 
         const interval = this._settings.get_int('update-interval');
         this._updateTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, interval, () => {
@@ -169,6 +209,9 @@ class PowerTokenIndicator extends PanelMenu.Button {
         this._energyCostItem.label.text = `Energy Cost/Hr: $${costPerHour.toFixed(4)}`;
 
         this._fetchTokenMetrics(tokensPerHour => {
+            if (!this._tracking)
+                return;
+
             if (tokensPerHour === null) {
                 this._tokenItem.label.text = 'Tokens (1h): unavailable';
                 this._costPerTokenItem.label.text = 'Cost/M Tokens: --';
@@ -193,10 +236,7 @@ class PowerTokenIndicator extends PanelMenu.Button {
     }
 
     destroy() {
-        if (this._updateTimeoutId) {
-            GLib.source_remove(this._updateTimeoutId);
-            this._updateTimeoutId = 0;
-        }
+        this._stopUpdates();
         this._cancellable.cancel();
         this._session.abort();
         this._session = null;

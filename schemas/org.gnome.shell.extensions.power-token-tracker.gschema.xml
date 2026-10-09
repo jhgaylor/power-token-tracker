@@ -21,5 +21,10 @@
       <summary>hal0 API URL</summary>
       <description>The URL of the hal0 API endpoint.</description>
     </key>
+    <key type="b" name="start-on-login">
+      <default>true</default>
+      <summary>Start tracking on login</summary>
+      <description>Whether tracking starts automatically when the shell loads. When off, the indicator starts paused and can be started from its menu.</description>
+    </key>
   </schema>
 </schemalist>

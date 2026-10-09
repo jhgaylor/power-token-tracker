@@ -22,6 +22,13 @@ export default class PowerTokenTrackerPreferences extends ExtensionPreferences {
         });
         page.add(group);
 
+        const startRow = new Adw.SwitchRow({
+            title: 'Start Tracking on Login',
+            subtitle: 'When off, the indicator starts paused; start it from its menu',
+        });
+        group.add(startRow);
+        settings.bind('start-on-login', startRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+
         const costRow = new Adw.SpinRow({
             title: 'Cost per kWh ($)',
             subtitle: 'Your electricity rate',

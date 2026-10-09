@@ -37,10 +37,19 @@ gnome-extensions prefs power-token-tracker@jhgaylor.local
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
+| Start tracking on login | `on` | When off, the indicator starts paused |
 | Cost per kWh | `0.12` | Your electricity rate, in dollars |
 | Update interval | `10` | Seconds between refreshes |
 | Show cost per token | `on` | Whether to compute cost per million tokens |
 | hal0 API URL | `http://localhost:8080` | Base URL; `/api/stats` is appended |
+
+## Pausing
+
+The panel menu has a **Tracking** switch. Turning it off stops all polling — no
+hwmon reads, no requests to hal0 — and the panel shows `⚡ off` until you turn it
+back on. The pause lasts for the session; at the next login tracking starts
+according to *Start tracking on login*. To remove the extension entirely, use
+`gnome-extensions disable power-token-tracker@jhgaylor.local`.
 
 ## How it works
 
