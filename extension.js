@@ -249,7 +249,7 @@ class PowerTokenIndicator extends PanelMenu.Button {
 export default class PowerTokenTrackerExtension extends Extension {
     enable() {
         this._indicator = new PowerTokenIndicator(this);
-        Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'right');
+        Main.panel.addToStatusArea(this.uuid, this._indicator, -1, 'center');
     }
 
     disable() {
