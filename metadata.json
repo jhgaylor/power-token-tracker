@@ -3,8 +3,8 @@
   "description": "Track GPU power consumption and AI token costs. Shows real-time power usage and calculates cost per token based on your electricity rate.",
   "uuid": "power-token-tracker@jhgaylor.local",
   "shell-version": ["50"],
-  "version": 1,
-  "version-name": "1.0.0",
+  "version": 2,
+  "version-name": "1.1.0",
   "settings-schema": "org.gnome.shell.extensions.power-token-tracker",
   "url": "https://github.com/jhgaylor/power-token-tracker"
 }
